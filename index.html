@@ -552,6 +552,14 @@
 
   <div id="apiQuota" style="display:none; font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-bottom:12px; padding:8px 14px; background:var(--surface); border:1px solid var(--border); border-radius:8px; width:fit-content;"></div>
 
+  <!-- SELETOR DE CASAS -->
+  <div style="margin-bottom:20px;">
+    <div style="font-family:var(--font-mono);font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">
+      🏦 Casas de apostas
+    </div>
+    <div id="bookmakersPanel" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+  </div>
+
   <div id="debugPanel" style="display:none; margin-bottom:16px; padding:14px 18px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:12px; font-family:var(--font-mono); font-size:11px; color:var(--muted); max-height:180px; overflow-y:auto; line-height:1.8;"></div>
 
   <div id="corsWarning" style="display:none; margin-bottom:16px; padding:14px 18px; background:rgba(255,214,0,0.07); border:1px solid rgba(255,214,0,0.25); border-radius:12px; font-size:13px; color:var(--yellow); line-height:1.6;">
@@ -673,7 +681,22 @@ const SPORTS = [
   { oddsKey: 'soccer_uefa_champs_league',  label: 'Champions League', sofaId: 7,    sofaSeason: 61571 },
 ];
 
-// ─── DEBUG ────────────────────────────────────────────────────────────────────
+// ─── CASAS DISPONÍVEIS (keys da The Odds API região EU/UK) ───────────────────
+const BOOKMAKERS = [
+  { key: 'betano',        label: 'Betano',        flag: '🇧🇷' },
+  { key: 'superbet',      label: 'Superbet',      flag: '🇧🇷' },
+  { key: 'bet365',        label: 'Bet365',        flag: '🌍' },
+  { key: 'williamhill',   label: 'William Hill',  flag: '🇬🇧' },
+  { key: 'unibet_eu',     label: 'Unibet',        flag: '🌍' },
+  { key: 'pinnacle',      label: 'Pinnacle',      flag: '🌍' },
+  { key: 'betsson',       label: 'Betsson',       flag: '🌍' },
+  { key: 'bwin',          label: 'Bwin',          flag: '🌍' },
+  { key: 'betclic',       label: 'Betclic',       flag: '🌍' },
+  { key: '1xbet',         label: '1xBet',         flag: '🌍' },
+];
+
+// Casas selecionadas pelo usuário (todas por padrão)
+let selectedBookmakers = new Set(BOOKMAKERS.map(b => b.key));
 const logs = [];
 function dbg(msg, color='#4a6577') {
   logs.push(`<span style="color:${color}">${msg}</span>`);
@@ -738,17 +761,18 @@ async function fetchTeamStats(teamId, sofaId, sofaSeason) {
 // SofaScore: mapa nome→id dos times da liga
 async function fetchTeamMap(sofaId, sofaSeason) {
   try {
-    const url = `${SOFA_BASE}/standings?tournamentId=${sofaId}&seasonId=${sofaSeason}`;
+    const url = `${SOFA_BASE}/standings?tournamentId=${sofaId}`;
     const res = await fetch(url);
-    if (!res.ok) return {};
+    if (!res.ok) return { map: {}, seasonId: sofaSeason };
     const data = await res.json();
+    const currentSeasonId = data._seasonId || sofaSeason;
     const map = {};
     data?.standings?.[0]?.rows?.forEach(r => {
       map[normalize(r.team.name)] = { id: r.team.id, name: r.team.name };
     });
-    dbg(`📋 SofaScore liga ${sofaId}: ${Object.keys(map).length} times encontrados`, '#00e5ff');
-    return map;
-  } catch(e) { dbg(`⚠️ SofaScore standings bloqueado para liga ${sofaId}`, '#ffd600'); return {}; }
+    dbg(`📋 SofaScore liga ${sofaId} (season ${currentSeasonId}): ${Object.keys(map).length} times`, '#00e5ff');
+    return { map, seasonId: currentSeasonId };
+  } catch(e) { dbg(`⚠️ SofaScore falhou liga ${sofaId}: ${e.message}`, '#ffd600'); return { map: {}, seasonId: sofaSeason }; }
 }
 
 // ─── PROBABILIDADE REAL via Poisson ──────────────────────────────────────────
@@ -774,7 +798,11 @@ function calcRealProb(homeStats, awayStats, marketType, line, isOver) {
 
 // ─── FETCH ODDS API ───────────────────────────────────────────────────────────
 async function fetchOdds(oddsKey) {
-  const url = `${ODDS_BASE}/sports/${oddsKey}/odds/?apiKey=${ODDS_API_KEY}&regions=eu,uk&markets=totals&oddsFormat=decimal&dateFormat=iso`;
+  // Monta parâmetro de casas selecionadas
+  const booksParam = selectedBookmakers.size > 0
+    ? `&bookmakers=${[...selectedBookmakers].join(',')}`
+    : `&regions=eu,uk`;
+  const url = `${ODDS_BASE}/sports/${oddsKey}/odds/?apiKey=${ODDS_API_KEY}${booksParam}&markets=totals&oddsFormat=decimal&dateFormat=iso`;
   dbg(`🔄 Odds API: ${oddsKey}...`);
   const res = await fetch(url);
 
@@ -800,7 +828,7 @@ async function processLeague(sport) {
   if (!games?.length) return [];
 
   // Tenta buscar mapa de times do SofaScore (pode falhar por CORS)
-  const teamMap = await fetchTeamMap(sport.sofaId, sport.sofaSeason);
+  const { map: teamMap, seasonId: currentSeasonId } = await fetchTeamMap(sport.sofaId, sport.sofaSeason);
   const hasSofa = Object.keys(teamMap).length > 0;
 
   const bets = [];
@@ -815,8 +843,8 @@ async function processLeague(sport) {
       const hNorm = normalize(game.home_team), aNorm = normalize(game.away_team);
       const hInfo = teamMap[hNorm] ?? Object.values(teamMap).find(t => normalize(t.name).includes(hNorm.slice(0,5)));
       const aInfo = teamMap[aNorm] ?? Object.values(teamMap).find(t => normalize(t.name).includes(aNorm.slice(0,5)));
-      if (hInfo) homeStats = await fetchTeamStats(hInfo.id, sport.sofaId, sport.sofaSeason);
-      if (aInfo) awayStats = await fetchTeamStats(aInfo.id, sport.sofaId, sport.sofaSeason);
+      if (hInfo) homeStats = await fetchTeamStats(hInfo.id, sport.sofaId, currentSeasonId);
+      if (aInfo) awayStats = await fetchTeamStats(aInfo.id, sport.sofaId, currentSeasonId);
     }
 
     // Coleta melhor odd por linha entre todas as casas
@@ -1001,6 +1029,33 @@ function filterMarket(market) {
 }
 function filterSearch(val) { searchQuery = val; renderBets(); }
 
+function renderBookmakers() {
+  const panel = document.getElementById('bookmakersPanel');
+  panel.innerHTML = '';
+  BOOKMAKERS.forEach(bm => {
+    const active = selectedBookmakers.has(bm.key);
+    const btn = document.createElement('button');
+    btn.style.cssText = `
+      padding:6px 14px; border-radius:8px; cursor:pointer; font-size:13px;
+      font-family:var(--font-display); font-weight:600; transition:all 0.2s;
+      border:1px solid ${active ? 'var(--accent)' : 'var(--border)'};
+      background:${active ? 'rgba(0,229,255,0.08)' : 'var(--surface)'};
+      color:${active ? 'var(--accent)' : 'var(--muted)'};
+    `;
+    btn.textContent = `${bm.flag} ${bm.label}`;
+    btn.onclick = () => {
+      if (selectedBookmakers.has(bm.key)) {
+        if (selectedBookmakers.size > 1) selectedBookmakers.delete(bm.key);
+      } else {
+        selectedBookmakers.add(bm.key);
+      }
+      renderBookmakers();
+    };
+    panel.appendChild(btn);
+  });
+}
+
+renderBookmakers();
 loadBets();
 setInterval(loadBets, 10*60*1000);
 
